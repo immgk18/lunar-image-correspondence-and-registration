@@ -1,6 +1,5 @@
 # ================================================================
-# 🌕 LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM
-# FINAL FLASK BACKEND
+# LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM
 # SIH26166 - Chandrayaan-2
 # ================================================================
 
@@ -14,7 +13,9 @@ from flask import (
     send_from_directory
 )
 
-from lunar_backend import analyze_lunar_images
+from lunar_backend import (
+    analyze_lunar_images
+)
 
 
 # ================================================================
@@ -35,7 +36,6 @@ RESULTS_FOLDER = os.path.join(
     "lunar_results"
 )
 
-
 os.makedirs(
     UPLOAD_FOLDER,
     exist_ok=True
@@ -52,14 +52,32 @@ os.makedirs(
 # ================================================================
 
 app = Flask(__name__)
+
+app.config[
+    "MAX_CONTENT_LENGTH"
+] = 100 * 1024 * 1024
+
+
+# ================================================================
+# CORS
+# ================================================================
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    return response
 
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+    response.headers[
+        "Access-Control-Allow-Origin"
+    ] = "*"
+
+    response.headers[
+        "Access-Control-Allow-Headers"
+    ] = "Content-Type"
+
+    response.headers[
+        "Access-Control-Allow-Methods"
+    ] = "GET, POST, OPTIONS"
+
+    return response
 
 
 # ================================================================
@@ -78,25 +96,33 @@ ALLOWED_EXTENSIONS = {
 
 def allowed_file(filename):
 
+    if not filename:
+        return False
+
     if "." not in filename:
         return False
 
-    extension = filename.rsplit(
-        ".",
-        1
-    )[1].lower()
+    extension = (
+        filename
+        .rsplit(".", 1)[1]
+        .lower()
+    )
 
-    return extension in ALLOWED_EXTENSIONS
+    return (
+        extension
+        in ALLOWED_EXTENSIONS
+    )
 
 
 # ================================================================
-# 🏠 HOME
+# HOME
 # ================================================================
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
 
     return jsonify({
+
         "system":
             "Lunar Image Correspondence and Registration System",
 
@@ -112,10 +138,13 @@ def home():
 
 
 # ================================================================
-# ❤️ HEALTH CHECK
+# STATUS
 # ================================================================
 
-@app.route("/status")
+@app.route(
+    "/status",
+    methods=["GET"]
+)
 def status():
 
     return jsonify({
@@ -124,7 +153,7 @@ def status():
             "online",
 
         "ai_backend":
-            "ready",
+            "available",
 
         "system":
             "Lunar Image Correspondence and Registration System",
@@ -135,46 +164,48 @@ def status():
 
             "Illumination-Robust Preprocessing",
 
-            "Multi-Scale LoFTR",
+            "LoFTR",
 
             "Confidence Filtering",
 
             "RANSAC Verification",
 
-            "Registration Refinement",
+            "Registration",
 
             "Spatial Analysis",
 
             "Quality Evaluation"
-
         ]
-
     })
 
 
 # ================================================================
-# 🧠 MAIN AI ANALYSIS API
+# ANALYZE
 # ================================================================
 
 @app.route(
     "/analyze",
-    methods=["POST"]
+    methods=["POST", "OPTIONS"]
 )
 def analyze():
 
-    print("\n" + "=" * 70)
+    # Browser CORS preflight
+    if request.method == "OPTIONS":
 
-    print(
-        "🌕 NEW LUNAR ANALYSIS REQUEST"
-    )
+        return (
+            "",
+            204
+        )
 
-    print("=" * 70)
-
+    print("\n")
+    print("=" * 60)
+    print("NEW LUNAR ANALYSIS REQUEST")
+    print("=" * 60)
 
     try:
 
         # --------------------------------------------------------
-        # CHECK IMAGE A
+        # CHECK FILES
         # --------------------------------------------------------
 
         if "image_A" not in request.files:
@@ -185,13 +216,8 @@ def analyze():
 
                 "error":
                     "Reference Image A was not uploaded."
-
             }), 400
 
-
-        # --------------------------------------------------------
-        # CHECK IMAGE B
-        # --------------------------------------------------------
 
         if "image_B" not in request.files:
 
@@ -201,7 +227,6 @@ def analyze():
 
                 "error":
                     "Target Image B was not uploaded."
-
             }), 400
 
 
@@ -218,7 +243,7 @@ def analyze():
         # CHECK FILENAMES
         # --------------------------------------------------------
 
-        if image_A.filename == "":
+        if not image_A.filename:
 
             return jsonify({
 
@@ -226,11 +251,10 @@ def analyze():
 
                 "error":
                     "Image A has no filename."
-
             }), 400
 
 
-        if image_B.filename == "":
+        if not image_B.filename:
 
             return jsonify({
 
@@ -238,12 +262,11 @@ def analyze():
 
                 "error":
                     "Image B has no filename."
-
             }), 400
 
 
         # --------------------------------------------------------
-        # CHECK FILE TYPES
+        # CHECK EXTENSIONS
         # --------------------------------------------------------
 
         if not allowed_file(
@@ -256,7 +279,6 @@ def analyze():
 
                 "error":
                     "Unsupported Image A format."
-
             }), 400
 
 
@@ -270,20 +292,23 @@ def analyze():
 
                 "error":
                     "Unsupported Image B format."
-
             }), 400
 
 
-        # ========================================================
-        # UNIQUE REQUEST ID
-        # ========================================================
+        # --------------------------------------------------------
+        # REQUEST ID
+        # --------------------------------------------------------
 
-        request_id = uuid.uuid4().hex[:8]
+        request_id = (
+            uuid.uuid4()
+            .hex[:8]
+        )
 
 
         extension_A = os.path.splitext(
             image_A.filename
         )[1].lower()
+
 
         extension_B = os.path.splitext(
             image_B.filename
@@ -291,24 +316,28 @@ def analyze():
 
 
         file_A_path = os.path.join(
+
             UPLOAD_FOLDER,
-            "image_A_" +
-            request_id +
-            extension_A
+
+            "image_A_"
+            + request_id
+            + extension_A
         )
 
 
         file_B_path = os.path.join(
+
             UPLOAD_FOLDER,
-            "image_B_" +
-            request_id +
-            extension_B
+
+            "image_B_"
+            + request_id
+            + extension_B
         )
 
 
-        # ========================================================
-        # SAVE UPLOADS
-        # ========================================================
+        # --------------------------------------------------------
+        # SAVE
+        # --------------------------------------------------------
 
         image_A.save(
             file_A_path
@@ -320,30 +349,22 @@ def analyze():
 
 
         print(
-            "\n📥 Image A received:"
+            "Image A received"
         )
 
         print(
-            file_A_path
+            "Image B received"
         )
 
+
+        # --------------------------------------------------------
+        # AI ANALYSIS
+        # --------------------------------------------------------
 
         print(
-            "\n📥 Image B received:"
+            "Starting AI analysis..."
         )
 
-        print(
-            file_B_path
-        )
-
-
-        # ========================================================
-        # 🧠 RUN OUR ACTUAL AI BACKEND
-        # ========================================================
-
-        print(
-            "\n🧠 Starting AI processing..."
-        )
 
         results = analyze_lunar_images(
 
@@ -352,13 +373,12 @@ def analyze():
             file_B_path,
 
             output_folder=RESULTS_FOLDER
-
         )
 
 
-        # ========================================================
-        # 🖼️ RESULT IMAGE URLs
-        # ========================================================
+        # --------------------------------------------------------
+        # RESULT IMAGE URLS
+        # --------------------------------------------------------
 
         results["images"] = {
 
@@ -379,13 +399,12 @@ def analyze():
 
             "spatial_distribution":
                 "/results/spatial_distribution.png"
-
         }
 
 
-        # ========================================================
-        # 📊 FINAL RESPONSE
-        # ========================================================
+        # --------------------------------------------------------
+        # SUCCESS RESPONSE
+        # --------------------------------------------------------
 
         response = {
 
@@ -400,20 +419,14 @@ def analyze():
 
             "results":
                 results
-
         }
 
 
         print(
-            "\n✅ AI analysis completed."
+            "AI analysis completed successfully"
         )
 
-        print(
-            "📊 Results sent to frontend."
-        )
-
-
-        print("\n" + "=" * 70)
+        print("=" * 60)
 
 
         return jsonify(
@@ -421,16 +434,15 @@ def analyze():
         )
 
 
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "\n❌ ERROR:"
+            "ANALYSIS ERROR:"
         )
 
         print(
-            str(e)
+            repr(error)
         )
-
 
         return jsonify({
 
@@ -438,17 +450,17 @@ def analyze():
                 False,
 
             "error":
-                str(e)
-
+                str(error)
         }), 500
 
 
 # ================================================================
-# 🖼️ SERVE RESULT IMAGES
+# RESULT IMAGES
 # ================================================================
 
 @app.route(
-    "/results/<filename>"
+    "/results/<path:filename>",
+    methods=["GET"]
 )
 def result_image(filename):
 
@@ -457,16 +469,16 @@ def result_image(filename):
         RESULTS_FOLDER,
 
         filename
-
     )
 
 
 # ================================================================
-# 📂 SERVE UPLOADED IMAGES
+# UPLOADED IMAGES
 # ================================================================
 
 @app.route(
-    "/uploads/<filename>"
+    "/uploads/<path:filename>",
+    methods=["GET"]
 )
 def uploaded_image(filename):
 
@@ -475,17 +487,14 @@ def uploaded_image(filename):
         UPLOAD_FOLDER,
 
         filename
-
     )
 
 
 # ================================================================
-# 🚦 ERROR HANDLER
+# FILE TOO LARGE
 # ================================================================
 
-@app.errorhandler(
-    413
-)
+@app.errorhandler(413)
 def file_too_large(error):
 
     return jsonify({
@@ -495,70 +504,39 @@ def file_too_large(error):
 
         "error":
             "Uploaded file is too large. Maximum size is 100 MB."
-
     }), 413
 
 
 # ================================================================
-# 🚀 START SERVER
+# GENERAL ERROR
+# ================================================================
+
+@app.errorhandler(500)
+def internal_error(error):
+
+    return jsonify({
+
+        "success":
+            False,
+
+        "error":
+            "Internal server error."
+    }), 500
+
+
+# ================================================================
+# LOCAL RUN
 # ================================================================
 
 if __name__ == "__main__":
 
-    print("\n")
-
-    print("=" * 70)
-
-    print(
-        "🌕 LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM"
-    )
-
-    print("=" * 70)
-
-    print(
-        "\n🧠 AI Backend:"
-    )
-
-    print(
-        "   LoFTR + RANSAC + Registration + Quality Analysis"
-    )
-
-    print(
-        "\n🌐 Flask Server:"
-    )
-
-    print(
-        "   http://127.0.0.1:5000"
-    )
-
-    print(
-        "\n❤️ Status:"
-    )
-
-    print(
-        "   http://127.0.0.1:5000/status"
-    )
-
-    print(
-        "\n📡 Analysis API:"
-    )
-
-    print(
-        "   POST /analyze"
-    )
-
-    print(
-        "\n🌕 Waiting for frontend..."
-    )
-
-    print("=" * 70)
-
     app.run(
-
-        host="127.0.0.1",
-
-        port=5000,
-
+        host="0.0.0.0",
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        ),
         debug=False
-
     )
