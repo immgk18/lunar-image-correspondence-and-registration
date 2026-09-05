@@ -50,6 +50,8 @@ TARGET_WIDTH = 320
 TARGET_HEIGHT = 192
 
 # Multi-scale factors
+# One scale is intentional for the 512 MB Render instance.
+# Extra scales multiply LoFTR memory and inference time.
 SCALES = [1.0]
 
 # LoFTR confidence threshold
@@ -88,17 +90,21 @@ print("\n🖥️ Processing device:", DEVICE)
 # 🤖 LOAD LoFTR
 # ================================================================
 
-print("\n🤖 Loading LoFTR...")
+# Load LoFTR only when an analysis request actually arrives.
+# This keeps /status lightweight on the 512 MB Render instance.
+matcher = None
 
-matcher = LoFTR(
-    pretrained="outdoor"
-)
+def get_matcher():
+    global matcher
 
-matcher = matcher.to(DEVICE)
+    if matcher is None:
+        print("\n🤖 Loading LoFTR for analysis...")
+        matcher = LoFTR(pretrained="outdoor")
+        matcher = matcher.to(DEVICE)
+        matcher.eval()
+        print("✅ LoFTR loaded successfully")
 
-matcher.eval()
-
-print("✅ LoFTR loaded successfully")
+    return matcher
 
 
 # ================================================================
@@ -263,9 +269,11 @@ def run_loftr(
         scaled_B
     )
 
+    model = get_matcher()
+
     with torch.inference_mode():
 
-        output = matcher(
+        output = model(
             {
                 "image0": tensor_A,
                 "image1": tensor_B
@@ -299,6 +307,9 @@ def run_loftr(
     del output
     del tensor_A
     del tensor_B
+    del scaled_A
+    del scaled_B
+    gc.collect()
 
     # ------------------------------------------------------------
     # Convert coordinates back to base 320×192 coordinates
@@ -1269,10 +1280,15 @@ def save_image(
     filename
 ):
 
-    cv2.imwrite(
+    ok = cv2.imwrite(
         filename,
         image
     )
+
+    if not ok:
+        raise RuntimeError(
+            "Could not save result image: " + str(filename)
+        )
 
     print(
         "💾 Saved:",
@@ -1354,6 +1370,10 @@ def analyze_lunar_images(
     processed_B = preprocess_image(
         image_B
     )
+
+    del image_A
+    del image_B
+    gc.collect()
 
     save_image(
         processed_A,
@@ -1683,6 +1703,14 @@ def analyze_lunar_images(
     # ============================================================
     # 9. RETURN EVERYTHING
     # ============================================================
+
+    best.pop("points_A", None)
+    best.pop("points_B", None)
+    best.pop("confidence", None)
+    best.pop("ransac", None)
+    best.pop("error", None)
+    best.pop("spatial", None)
+    gc.collect()
 
     return {
 
