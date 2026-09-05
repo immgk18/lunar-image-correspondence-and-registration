@@ -1,0 +1,8 @@
+Flask
+flask-cors
+numpy
+opencv-python-headless
+matplotlib
+torch
+kornia
+gunicorn
