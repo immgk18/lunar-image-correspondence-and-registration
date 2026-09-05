@@ -856,7 +856,7 @@ input[type="file"] {
     <div class="actions">
 
         <button class="secondary-button"
-                onclick="goTo('overview')">
+                onclick="resetAnalysis()">
             ← BACK
         </button>
 
@@ -1386,104 +1386,73 @@ input[type="file"] {
 
 
 <script>
-
-/* =========================================================
-   GLOBAL STATE
-========================================================= */
+const BACKEND_URL = "https://lunar-image-correspondence-and.onrender.com";
+const ANALYZE_URL = BACKEND_URL + "/analyze";
+const STATUS_URL = BACKEND_URL + "/status";
 
 let analysisResults = null;
-
-
-/* =========================================================
-   NAVIGATION
-========================================================= */
+let previewObjectURL_A = null;
+let previewObjectURL_B = null;
 
 function showSection(id, button) {
-
     document.querySelectorAll(".section").forEach(section => {
         section.classList.remove("active");
     });
 
     const target = document.getElementById(id);
-
-    if (target) {
-        target.classList.add("active");
-    }
+    if (target) target.classList.add("active");
 
     document.querySelectorAll(".nav button").forEach(btn => {
         btn.classList.remove("active");
     });
 
-    if (button) {
-        button.classList.add("active");
-    }
+    if (button) button.classList.add("active");
 
-    window.scrollTo({
-        top: 0,
-        behavior: "smooth"
-    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-
 function goTo(id) {
-
-    const button = Array.from(
-        document.querySelectorAll(".nav button")
-    ).find(btn =>
-        btn.getAttribute("onclick") &&
-        btn.getAttribute("onclick").includes("'" + id + "'")
-    );
+    const button = Array.from(document.querySelectorAll(".nav button"))
+        .find(btn => (btn.getAttribute("onclick") || "").includes("'" + id + "'"));
 
     showSection(id, button);
 }
 
-
-/* =========================================================
-   IMAGE PREVIEW
-========================================================= */
-
 function previewImage(input, previewId) {
-
-    if (!input.files || !input.files[0]) {
-        return;
-    }
+    if (!input || !input.files || !input.files[0]) return;
 
     const file = input.files[0];
-
     const preview = document.getElementById(previewId);
+    if (!preview) return;
 
-    preview.src = URL.createObjectURL(file);
+    if (previewId === "previewA" && previewObjectURL_A) {
+        URL.revokeObjectURL(previewObjectURL_A);
+    }
 
-    preview.style.display = "block";
+    if (previewId === "previewB" && previewObjectURL_B) {
+        URL.revokeObjectURL(previewObjectURL_B);
+    }
+
+    const objectURL = URL.createObjectURL(file);
 
     if (previewId === "previewA") {
-        document.getElementById("nameA").textContent =
-            file.name;
+        previewObjectURL_A = objectURL;
+        setText("nameA", file.name);
+    } else {
+        previewObjectURL_B = objectURL;
+        setText("nameB", file.name);
     }
 
-    if (previewId === "previewB") {
-        document.getElementById("nameB").textContent =
-            file.name;
-    }
+    preview.src = objectURL;
+    preview.style.display = "block";
+    hideError();
 }
 
-
-/* =========================================================
-   SAFE VALUE HELPERS
-========================================================= */
-
 function getValue(obj, names, fallback = "—") {
-
-    if (!obj) {
-        return fallback;
-    }
+    if (!obj) return fallback;
 
     for (const name of names) {
-
-        if (
-            obj[name] !== undefined &&
-            obj[name] !== null
-        ) {
+        if (obj[name] !== undefined && obj[name] !== null) {
             return obj[name];
         }
     }
@@ -1491,710 +1460,407 @@ function getValue(obj, names, fallback = "—") {
     return fallback;
 }
 
-
 function formatNumber(value, digits = 4) {
+    if (value === "—" || value === null || value === undefined || value === "") {
+        return "—";
+    }
 
-    if (
-        value === "—" ||
-        value === null ||
-        value === undefined
-    ) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits) : String(value);
+}
+
+function formatPercent(value) {
+    if (value === "—" || value === null || value === undefined || value === "") {
         return "—";
     }
 
     const number = Number(value);
 
-    if (Number.isNaN(number)) {
-        return value;
-    }
-
-    return number.toFixed(digits);
+    if (!Number.isFinite(number)) return String(value);
+    return number <= 1
+        ? (number * 100).toFixed(2) + "%"
+        : number.toFixed(2) + "%";
 }
 
-
-/* =========================================================
-   IMAGE URL
-========================================================= */
-
 function resultURL(path) {
+    if (!path) return "";
 
-    if (!path) {
-        return "";
-    }
-
-    if (
-        path.startsWith("http://") ||
-        path.startsWith("https://")
-    ) {
+    if (path.startsWith("http://") || path.startsWith("https://")) {
         return path;
     }
 
-    return "https://lunar-image-correspondence-and.onrender.com" + path +
-           "?t=" + Date.now();
+    const cleanPath = path.startsWith("/") ? path : "/" + path;
+    return BACKEND_URL + cleanPath + "?t=" + Date.now();
 }
 
-
 function setResultImage(id, path) {
-
     const image = document.getElementById(id);
+    if (!image) return;
 
-    if (!image || !path) {
+    if (!path) {
+        image.removeAttribute("src");
         return;
     }
 
     image.src = resultURL(path);
 
     image.onerror = function() {
-        console.log(
-            "Could not load result image:",
-            path
-        );
+        console.warn("Could not load result image:", path);
     };
 }
 
+async function getBackendStatus() {
+    const response = await fetch(STATUS_URL, {
+        method: "GET",
+        cache: "no-store"
+    });
 
-/* =========================================================
-   START ANALYSIS
-========================================================= */
+    if (!response.ok) {
+        throw new Error("Backend health check returned HTTP " + response.status + ".");
+    }
+
+    return response.json();
+}
+
+async function checkBackend() {
+    const statusElement = document.querySelector(".status");
+
+    try {
+        await getBackendStatus();
+
+        if (statusElement) {
+            statusElement.innerHTML =
+                '<span class="status-dot"></span> BACKEND ONLINE';
+        }
+
+        return true;
+    } catch (error) {
+        if (statusElement) {
+            statusElement.innerHTML =
+                '<span style="color:#ff9d9d;">●</span> BACKEND OFFLINE';
+        }
+
+        console.warn("Backend health check failed:", error);
+        return false;
+    }
+}
+
+function setLoadingMessage(message) {
+    const loading = document.getElementById("loading");
+    if (!loading) return;
+
+    const children = loading.querySelectorAll("div");
+    if (children.length > 1) {
+        children[children.length - 1].textContent = message;
+    }
+}
 
 async function startAnalysis() {
+    const inputA = document.getElementById("imageA");
+    const inputB = document.getElementById("imageB");
 
-    const fileA =
-        document.getElementById("imageA").files[0];
-
-    const fileB =
-        document.getElementById("imageB").files[0];
-
+    const fileA = inputA && inputA.files ? inputA.files[0] : null;
+    const fileB = inputB && inputB.files ? inputB.files[0] : null;
 
     if (!fileA || !fileB) {
-
-        showError(
-            "Please select both Image A and Image B before starting the analysis."
-        );
-
+        showError("Please select both Image A and Image B before starting the analysis.");
         return;
     }
 
-
     hideError();
 
-    const loading =
-        document.getElementById("loading");
+    const loading = document.getElementById("loading");
+    const startButton = document.querySelector(
+        '#acquisition button[onclick="startAnalysis()"]'
+    );
 
-    loading.style.display = "block";
+    if (loading) loading.style.display = "block";
 
+    if (startButton) {
+        startButton.disabled = true;
+        startButton.style.opacity = "0.65";
+        startButton.style.cursor = "wait";
+    }
 
     try {
+        /*
+         * First wake/check Render. This is important when the free service
+         * has been sleeping.
+         */
+        setLoadingMessage("Connecting to the lunar analysis backend...");
+        await getBackendStatus();
 
         const formData = new FormData();
+        formData.append("image_A", fileA, fileA.name);
+        formData.append("image_B", fileB, fileB.name);
 
-        formData.append(
-            "image_A",
-            fileA
-        );
-
-        formData.append(
-            "image_B",
-            fileB
-        );
-
+        setLoadingMessage("Uploading lunar images and starting AI analysis...");
 
         /*
-         * OUR FLASK API
+         * The Render Gunicorn service is configured for a 300-second timeout.
+         * Give the browser a little longer before it stops waiting.
          */
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 360000);
 
-        const response = await fetch(
-            "https://lunar-image-correspondence-and.onrender.com/analyze",
-            {
+        let response;
+
+        try {
+            setLoadingMessage(
+                "Running LoFTR, RANSAC and registration analysis..."
+            );
+
+            response = await fetch(ANALYZE_URL, {
                 method: "POST",
-                body: formData
-            }
-        );
+                body: formData,
+                signal: controller.signal,
+                cache: "no-store"
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
 
+        const contentType = response.headers.get("content-type") || "";
+        let data;
 
-        const data = await response.json();
-
-
-        if (!response.ok || !data.success) {
+        if (contentType.includes("application/json")) {
+            data = await response.json();
+        } else {
+            const text = await response.text();
 
             throw new Error(
-                data.error ||
-                "The Flask backend returned an error."
+                "Backend returned HTTP " + response.status +
+                (text ? ": " + text.slice(0, 300) : ".")
             );
         }
 
+        if (!response.ok || !data || data.success !== true) {
+            throw new Error(
+                getValue(
+                    data,
+                    ["error", "message"],
+                    "Backend returned HTTP " + response.status + "."
+                )
+            );
+        }
 
-        analysisResults =
-            data.results || data;
+        analysisResults = data.results || data;
+        updateDashboard(analysisResults);
 
-
-        updateDashboard(
-            analysisResults
-        );
-
-
-        loading.style.display = "none";
-
-
-        /*
-         * Move automatically to LoFTR
-         */
+        if (loading) loading.style.display = "none";
 
         goTo("loftr");
 
+        console.log("Lunar analysis completed:", data);
 
     } catch (error) {
+        if (loading) loading.style.display = "none";
 
-        loading.style.display = "none";
+        let message;
 
-        showError(
-            "Backend connection failed: " +
-            error.message +
-            "\n\nMake sure app.py is running at https://lunar-image-correspondence-and.onrender.com"
-        );
+        if (error && error.name === "AbortError") {
+            message =
+                "The analysis exceeded 6 minutes. Check the Render logs to see whether the AI process is still running.";
+        } else if (
+            error &&
+            error.message &&
+            error.message.includes("Failed to fetch")
+        ) {
+            message =
+                "The browser could not complete the connection to the analysis backend. " +
+                "The server may have restarted or failed during AI processing.";
+        } else {
+            message =
+                error && error.message
+                    ? error.message
+                    : "Unknown backend error.";
+        }
 
-        console.error(error);
+        showError("Analysis failed: " + message);
+        console.error("Lunar analysis failed:", error);
+
+    } finally {
+        if (startButton) {
+            startButton.disabled = false;
+            startButton.style.opacity = "";
+            startButton.style.cursor = "";
+        }
     }
 }
-
-
-/* =========================================================
-   UPDATE DASHBOARD
-========================================================= */
 
 function updateDashboard(results) {
-
     const r = results || {};
-
-    const images =
-        r.images || {};
-
-
-    /* -------------------------------------------------------
-       MATCHING
-    ------------------------------------------------------- */
-
-    const totalMatches = getValue(
-        r,
-        [
-            "total_matches",
-            "totalMatches",
-            "loftr_matches",
-            "matches"
-        ]
-    );
-
-
-    const averageConfidence = getValue(
-        r,
-        [
-            "average_confidence",
-            "avg_confidence",
-            "averageConfidence"
-        ]
-    );
-
-
-    const bestConfidence = getValue(
-        r,
-        [
-            "best_confidence",
-            "bestConfidence"
-        ]
-    );
-
-
-    const lowestConfidence = getValue(
-        r,
-        [
-            "lowest_confidence",
-            "lowestConfidence"
-        ]
-    );
-
-
-    const selectedScale = getValue(
-        r,
-        [
-            "selected_scale",
-            "selectedScale",
-            "scale"
-        ]
-    );
-
-
-    /* -------------------------------------------------------
-       RANSAC
-    ------------------------------------------------------- */
-
-    const inliers = getValue(
-        r,
-        [
-            "ransac_inliers",
-            "inliers"
-        ]
-    );
-
-
-    const outliers = getValue(
-        r,
-        [
-            "ransac_outliers",
-            "outliers"
-        ]
-    );
-
-
-    const inlierRatio = getValue(
-        r,
-        [
-            "inlier_ratio",
-            "inlierRatio"
-        ]
-    );
-
-
-    /* -------------------------------------------------------
-       REGISTRATION
-    ------------------------------------------------------- */
-
-    const rmse = getValue(
-        r,
-        [
-            "registration_rmse",
-            "rmse",
-            "registration_RMSE"
-        ]
-    );
-
-
-    const meanError = getValue(
-        r,
-        [
-            "mean_error",
-            "meanError"
-        ]
-    );
-
-
-    const maxError = getValue(
-        r,
-        [
-            "maximum_error",
-            "max_error",
-            "maximumError"
-        ]
-    );
-
-
-    const subpixel = getValue(
-        r,
-        [
-            "subpixel_rate",
-            "sub_pixel_rate",
-            "subpixel_percentage",
-            "subpixelRate"
-        ]
-    );
-
-
-    /* -------------------------------------------------------
-       QUALITY
-    ------------------------------------------------------- */
-
-    const coverage = getValue(
-        r,
-        [
-            "spatial_coverage",
-            "spatialCoverage"
-        ]
-    );
-
-
-    const uniformity = getValue(
-        r,
-        [
-            "spatial_uniformity",
-            "spatialUniformity"
-        ]
-    );
-
-
-    const quality = getValue(
-        r,
-        [
-            "overall_quality",
-            "overallQuality",
-            "quality"
-        ]
-    );
-
-
-    const status = getValue(
-        r,
-        [
-            "final_status",
-            "status",
-            "quality_status"
-        ],
-        "ANALYSIS COMPLETE"
-    );
-
-
-    /* =====================================================
-       UPDATE LOFTR
-    ===================================================== */
-
-    setText(
-        "totalMatches",
-        totalMatches
-    );
-
-    setText(
-        "avgConfidence",
-        formatNumber(
-            averageConfidence
-        )
-    );
-
-    setText(
-        "bestConfidence",
-        formatNumber(
-            bestConfidence
-        )
-    );
-
-    setText(
-        "selectedScale",
-        selectedScale
-    );
-
-
-    /* =====================================================
-       UPDATE RANSAC
-    ===================================================== */
-
-    setText(
-        "ransacInliers",
-        inliers
-    );
-
-    setText(
-        "ransacOutliers",
-        outliers
-    );
-
-    setText(
-        "inlierRatio",
-        formatPercent(
-            inlierRatio
-        )
-    );
-
-    setText(
-        "lowestConfidence",
-        formatNumber(
-            lowestConfidence
-        )
-    );
-
-
-    /* =====================================================
-       UPDATE REGISTRATION
-    ===================================================== */
-
-    setText(
-        "rmse",
-        formatNumber(
-            rmse
-        )
-    );
-
-    setText(
-        "meanError",
-        formatNumber(
-            meanError
-        )
-    );
-
-    setText(
-        "maxError",
-        formatNumber(
-            maxError
-        )
-    );
-
-    setText(
-        "subpixelRate",
-        formatPercent(
-            subpixel
-        )
-    );
-
-
-    /* =====================================================
-       UPDATE QUALITY
-    ===================================================== */
-
-    setText(
-        "spatialCoverage",
-        formatPercent(
-            coverage
-        )
-    );
-
-    setText(
-        "spatialUniformity",
-        formatNumber(
-            uniformity
-        )
-    );
-
-    setText(
-        "overallQuality",
-        formatNumber(
-            quality
-        )
-    );
-
-    setText(
-        "qualityStatus",
-        status
-    );
-
-
-    /* =====================================================
-       FINAL REPORT
-    ===================================================== */
-
-    setText(
-        "finalScale",
-        selectedScale
-    );
-
-    setText(
-        "finalMatches",
-        totalMatches
-    );
-
-    setText(
-        "finalInliers",
-        inliers
-    );
-
-    setText(
-        "finalOutliers",
-        outliers
-    );
-
-    setText(
-        "finalInlierRatio",
-        formatPercent(
-            inlierRatio
-        )
-    );
-
-    setText(
-        "finalRMSE",
-        formatNumber(
-            rmse
-        )
-    );
-
-    setText(
-        "finalMeanError",
-        formatNumber(
-            meanError
-        )
-    );
-
-    setText(
-        "finalMaxError",
-        formatNumber(
-            maxError
-        )
-    );
-
-    setText(
-        "finalSubpixel",
-        formatPercent(
-            subpixel
-        )
-    );
-
-    setText(
-        "finalCoverage",
-        formatPercent(
-            coverage
-        )
-    );
-
-    setText(
-        "finalUniformity",
-        formatNumber(
-            uniformity
-        )
-    );
-
-    setText(
-        "finalQuality",
-        formatNumber(
-            quality
-        )
-    );
-
-    setText(
-        "finalStatus",
-        status
-    );
-
-
-    /* =====================================================
-       RESULT IMAGES
-    ===================================================== */
-
-    setResultImage(
-        "preprocessedA",
-        images.preprocessed_A
-    );
-
-    setResultImage(
-        "preprocessedB",
-        images.preprocessed_B
-    );
-
-    setResultImage(
-        "ransacImage",
-        images.ransac_inliers
-    );
-
-    setResultImage(
-        "ransacImageLoftr",
-        images.ransac_inliers
-    );
-
-    setResultImage(
-        "registeredImage",
-        images.registered_refined
-    );
-
-    setResultImage(
-        "qualityMap",
-        images.correspondence_quality_map
-    );
-
-    setResultImage(
-        "spatialImage",
-        images.spatial_distribution
-    );
+    const images = r.images || {};
+
+    const totalMatches = getValue(r, [
+        "total_matches", "totalMatches", "loftr_matches", "matches"
+    ]);
+
+    const averageConfidence = getValue(r, [
+        "average_confidence", "avg_confidence", "averageConfidence"
+    ]);
+
+    const bestConfidence = getValue(r, [
+        "best_confidence", "bestConfidence"
+    ]);
+
+    const lowestConfidence = getValue(r, [
+        "lowest_confidence", "lowestConfidence"
+    ]);
+
+    const selectedScale = getValue(r, [
+        "selected_scale", "selectedScale", "scale"
+    ]);
+
+    const inliers = getValue(r, [
+        "ransac_inliers", "inliers"
+    ]);
+
+    const outliers = getValue(r, [
+        "ransac_outliers", "outliers"
+    ]);
+
+    const inlierRatio = getValue(r, [
+        "inlier_ratio", "inlierRatio"
+    ]);
+
+    const rmse = getValue(r, [
+        "registration_rmse", "rmse", "registration_RMSE"
+    ]);
+
+    const meanError = getValue(r, [
+        "mean_error", "meanError"
+    ]);
+
+    const maxError = getValue(r, [
+        "maximum_error", "max_error", "maximumError"
+    ]);
+
+    const subpixel = getValue(r, [
+        "subpixel_rate", "sub_pixel_rate",
+        "subpixel_percentage", "subpixelRate"
+    ]);
+
+    const coverage = getValue(r, [
+        "spatial_coverage", "spatialCoverage"
+    ]);
+
+    const uniformity = getValue(r, [
+        "spatial_uniformity", "spatialUniformity"
+    ]);
+
+    const quality = getValue(r, [
+        "overall_quality", "overallQuality", "quality"
+    ]);
+
+    const status = getValue(r, [
+        "final_status", "status", "quality_status"
+    ], "ANALYSIS COMPLETE");
+
+    setText("totalMatches", totalMatches);
+    setText("avgConfidence", formatNumber(averageConfidence));
+    setText("bestConfidence", formatNumber(bestConfidence));
+    setText("selectedScale", selectedScale);
+
+    setText("ransacInliers", inliers);
+    setText("ransacOutliers", outliers);
+    setText("inlierRatio", formatPercent(inlierRatio));
+    setText("lowestConfidence", formatNumber(lowestConfidence));
+
+    setText("rmse", formatNumber(rmse));
+    setText("meanError", formatNumber(meanError));
+    setText("maxError", formatNumber(maxError));
+    setText("subpixelRate", formatPercent(subpixel));
+
+    setText("spatialCoverage", formatPercent(coverage));
+    setText("spatialUniformity", formatNumber(uniformity));
+    setText("overallQuality", formatNumber(quality));
+    setText("qualityStatus", status);
+
+    setText("finalScale", selectedScale);
+    setText("finalMatches", totalMatches);
+    setText("finalInliers", inliers);
+    setText("finalOutliers", outliers);
+    setText("finalInlierRatio", formatPercent(inlierRatio));
+    setText("finalRMSE", formatNumber(rmse));
+    setText("finalMeanError", formatNumber(meanError));
+    setText("finalMaxError", formatNumber(maxError));
+    setText("finalSubpixel", formatPercent(subpixel));
+    setText("finalCoverage", formatPercent(coverage));
+    setText("finalUniformity", formatNumber(uniformity));
+    setText("finalQuality", formatNumber(quality));
+    setText("finalStatus", status);
+
+    setResultImage("preprocessedA", images.preprocessed_A);
+    setResultImage("preprocessedB", images.preprocessed_B);
+    setResultImage("ransacImage", images.ransac_inliers);
+    setResultImage("ransacImageLoftr", images.ransac_inliers);
+    setResultImage("registeredImage", images.registered_refined);
+    setResultImage("qualityMap", images.correspondence_quality_map);
+    setResultImage("spatialImage", images.spatial_distribution);
 }
-
-
-/* =========================================================
-   TEXT HELPERS
-========================================================= */
 
 function setText(id, value) {
-
-    const element =
-        document.getElementById(id);
-
+    const element = document.getElementById(id);
     if (element) {
-        element.textContent = value;
+        element.textContent =
+            value === undefined || value === null ? "—" : value;
     }
 }
-
-
-function formatPercent(value) {
-
-    if (
-        value === "—" ||
-        value === null ||
-        value === undefined
-    ) {
-        return "—";
-    }
-
-    const number = Number(value);
-
-    if (Number.isNaN(number)) {
-        return value;
-    }
-
-    /*
-     * If backend gives 0.9943,
-     * convert to 99.43%.
-     *
-     * If backend already gives 99.43,
-     * keep it as 99.43%.
-     */
-
-    if (number <= 1) {
-        return (number * 100).toFixed(2) + "%";
-    }
-
-    return number.toFixed(2) + "%";
-}
-
-
-/* =========================================================
-   ERROR DISPLAY
-========================================================= */
 
 function showError(message) {
-
-    const box =
-        document.getElementById("errorBox");
+    const box = document.getElementById("errorBox");
+    if (!box) return;
 
     box.textContent = message;
-
     box.style.display = "block";
 }
 
-
 function hideError() {
+    const box = document.getElementById("errorBox");
+    if (!box) return;
 
-    const box =
-        document.getElementById("errorBox");
-
+    box.textContent = "";
     box.style.display = "none";
 }
 
+function resetAnalysis() {
+    analysisResults = null;
 
-/* =========================================================
-   INITIAL STATUS CHECK
-========================================================= */
+    const inputA = document.getElementById("imageA");
+    const inputB = document.getElementById("imageB");
 
-async function checkBackend() {
+    if (inputA) inputA.value = "";
+    if (inputB) inputB.value = "";
 
-    try {
+    ["previewA", "previewB"].forEach(id => {
+        const image = document.getElementById(id);
 
-        const response = await fetch(
-            "https://lunar-image-correspondence-and.onrender.com/status"
-        );
-
-
-        if (response.ok) {
-
-            document.querySelector(
-                ".status"
-            ).innerHTML =
-                '<span class="status-dot"></span> BACKEND ONLINE';
-
+        if (image) {
+            image.removeAttribute("src");
+            image.style.display = "none";
         }
+    });
 
-    } catch (error) {
+    setText("nameA", "");
+    setText("nameB", "");
 
-        document.querySelector(
-            ".status"
-        ).innerHTML =
-            '<span style="color:#ff9d9d;">●</span> BACKEND OFFLINE';
+    hideError();
+
+    if (previewObjectURL_A) {
+        URL.revokeObjectURL(previewObjectURL_A);
+        previewObjectURL_A = null;
     }
+
+    if (previewObjectURL_B) {
+        URL.revokeObjectURL(previewObjectURL_B);
+        previewObjectURL_B = null;
+    }
+
+    goTo("overview");
 }
 
-
-checkBackend();
-
+window.addEventListener("DOMContentLoaded", checkBackend);
 </script>
 
 </body>
