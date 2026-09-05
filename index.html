@@ -1604,7 +1604,7 @@ async function startAnalysis() {
          */
 
         const response = await fetch(
-            "http://127.0.0.1:5000/analyze",
+            "https://lunar-image-correspondence-and-registration.onrender.com/analyze",
             {
                 method: "POST",
                 body: formData
@@ -1650,7 +1650,7 @@ async function startAnalysis() {
         showError(
             "Backend connection failed: " +
             error.message +
-            "\n\nMake sure app.py is running at http://127.0.0.1:5000"
+            "\n\nMake sure app.py is running at https://lunar-image-correspondence-and-registration.onrender.com"
         );
 
         console.error(error);
