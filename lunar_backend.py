@@ -1,100 +1,143 @@
 # ================================================================
 # 🌕 LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM
-# SIH26166 - Chandrayaan-2 Lunar Image Matching
+# SIH26166 - Chandrayaan-2
 #
-# STRENGTHENED RESEARCH BACKEND
+# SERVER-OPTIMIZED AI BACKEND
 #
 # Pipeline:
-# Input Validation
-#      ↓
+# Input
+#   ↓
 # Illumination-Robust Preprocessing
-#      ↓
-# Multi-Scale LoFTR
-#      ↓
+#   ↓
+# LoFTR Correspondence
+#   ↓
 # Confidence Filtering
-#      ↓
-# RANSAC Geometric Verification
-#      ↓
+#   ↓
+# Duplicate Removal
+#   ↓
+# RANSAC Verification
+#   ↓
 # Registration Refinement
-#      ↓
-# Spatial Uniformity Analysis
-#      ↓
-# Adaptive Quality Control
-#      ↓
-# Final Evaluation
+#   ↓
+# Spatial Quality Analysis
+#   ↓
+# Final Metrics
 # ================================================================
 
 import os
+
+# ---------------------------------------------------------------
+# Limit CPU thread creation before loading PyTorch
+# ---------------------------------------------------------------
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import cv2
-import torch
-import kornia
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
 
 from kornia.feature import LoFTR
 
 
 # ================================================================
-# ⚙️ CONFIGURATION
+# CONFIGURATION
 # ================================================================
 
-TARGET_WIDTH = 640
-TARGET_HEIGHT = 384
+# IMPORTANT:
+# Reduced from 640x384 to 320x192 for low-memory deployment.
+#
+# 320 and 192 are both divisible by 8, which is suitable for
+# LoFTR's feature pyramid.
+TARGET_WIDTH = 320
+TARGET_HEIGHT = 192
 
-# Multi-scale factors
-SCALES = [0.85, 1.0]
+# Server mode:
+# Use one scale to avoid running LoFTR twice.
+SCALE = 1.0
 
 # LoFTR confidence threshold
 CONFIDENCE_THRESHOLD = 0.30
 
-# Minimum number of matches
+# Minimum number of matches needed for RANSAC
 MIN_MATCHES = 8
 
 # RANSAC reprojection threshold
 RANSAC_THRESHOLD = 5.0
 
-# Spatial grid
+# Spatial quality grid
 GRID_ROWS = 4
 GRID_COLS = 4
 
-# Number of correspondences shown in visualization
+# Maximum matches drawn in visualization
 MAX_VISUAL_MATCHES = 100
 
 
 # ================================================================
-# 🖥️ DEVICE
+# DEVICE
 # ================================================================
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+DEVICE = torch.device("cpu")
 
-print("\n" + "=" * 75)
+# Keep PyTorch CPU thread usage small on the Render instance.
+try:
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
+try:
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
+
+
+print("\n" + "=" * 70)
 print("🌕 LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM")
-print("=" * 75)
+print("=" * 70)
 
-print("\n🖥️ Processing device:", DEVICE)
-
-
-# ================================================================
-# 🤖 LOAD LoFTR
-# ================================================================
-
-print("\n🤖 Loading LoFTR...")
-
-matcher = LoFTR(
-    pretrained="outdoor"
-)
-
-matcher = matcher.to(DEVICE)
-
-matcher.eval()
-
-print("✅ LoFTR loaded successfully")
+print("🖥️ Processing device:", DEVICE)
+print("📐 Server image size:",
+      TARGET_WIDTH, "x", TARGET_HEIGHT)
 
 
 # ================================================================
-# 🧹 ILLUMINATION-ROBUST PREPROCESSING
+# LAZY LoFTR MODEL
+# ================================================================
+#
+# IMPORTANT:
+# The model is NOT loaded while the module is imported.
+#
+# This allows Flask /status to start without immediately loading
+# the heavy LoFTR model.
+# ================================================================
+
+matcher = None
+
+
+def get_matcher():
+    global matcher
+
+    if matcher is None:
+
+        print("\n🤖 Loading LoFTR for first analysis...")
+
+        matcher = LoFTR(
+            pretrained="outdoor"
+        )
+
+        matcher = matcher.to(DEVICE)
+
+        matcher.eval()
+
+        print("✅ LoFTR loaded successfully")
+
+    return matcher
+
+
+# ================================================================
+# IMAGE PREPROCESSING
 # ================================================================
 
 def preprocess_image(image):
@@ -145,9 +188,6 @@ def preprocess_image(image):
 
     # ------------------------------------------------------------
     # CLAHE
-    #
-    # Helps preserve local lunar surface details when
-    # illumination differs between images.
     # ------------------------------------------------------------
 
     clahe = cv2.createCLAHE(
@@ -158,9 +198,7 @@ def preprocess_image(image):
     enhanced = clahe.apply(gray)
 
     # ------------------------------------------------------------
-    # Mild Gaussian smoothing
-    #
-    # Reduces sensor noise while preserving larger features.
+    # Mild denoising
     # ------------------------------------------------------------
 
     enhanced = cv2.GaussianBlur(
@@ -185,36 +223,33 @@ def preprocess_image(image):
 
 
 # ================================================================
-# 🔄 RESIZE
+# RESIZE
 # ================================================================
 
-def resize_image(image, scale=1.0):
-
-    width = int(
-        TARGET_WIDTH * scale
-    )
-
-    height = int(
-        TARGET_HEIGHT * scale
-    )
+def resize_image(image):
 
     return cv2.resize(
         image,
-        (width, height),
+        (
+            TARGET_WIDTH,
+            TARGET_HEIGHT
+        ),
         interpolation=cv2.INTER_AREA
     )
 
 
 # ================================================================
-# 🔢 IMAGE → TENSOR
+# IMAGE → TENSOR
 # ================================================================
 
 def image_to_tensor(image):
 
     tensor = (
-        torch.from_numpy(image)
+        torch.from_numpy(
+            image
+        )
         .float()
-        / 255.0
+        .div(255.0)
     )
 
     tensor = (
@@ -228,23 +263,22 @@ def image_to_tensor(image):
 
 
 # ================================================================
-# 🤖 LoFTR MATCHING
+# LoFTR MATCHING
 # ================================================================
 
 def run_loftr(
     image_A,
-    image_B,
-    scale
+    image_B
 ):
 
+    model = get_matcher()
+
     scaled_A = resize_image(
-        image_A,
-        scale
+        image_A
     )
 
     scaled_B = resize_image(
-        image_B,
-        scale
+        image_B
     )
 
     tensor_A = image_to_tensor(
@@ -255,44 +289,47 @@ def run_loftr(
         scaled_B
     )
 
-    with torch.no_grad():
+    try:
 
-        output = matcher(
-            {
-                "image0": tensor_A,
-                "image1": tensor_B
-            }
+        with torch.inference_mode():
+
+            output = model(
+                {
+                    "image0": tensor_A,
+                    "image1": tensor_B
+                }
+            )
+
+        points_A = (
+            output["keypoints0"]
+            .detach()
+            .cpu()
+            .numpy()
         )
 
-    points_A = (
-        output["keypoints0"]
-        .detach()
-        .cpu()
-        .numpy()
-    )
+        points_B = (
+            output["keypoints1"]
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-    points_B = (
-        output["keypoints1"]
-        .detach()
-        .cpu()
-        .numpy()
-    )
+        confidence = (
+            output["confidence"]
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-    confidence = (
-        output["confidence"]
-        .detach()
-        .cpu()
-        .numpy()
-    )
+    finally:
 
-    # ------------------------------------------------------------
-    # Convert coordinates back to base 640×384 coordinates
-    # ------------------------------------------------------------
+        # Release temporary tensors.
+        del tensor_A
+        del tensor_B
 
-    if scale != 1.0:
+        if DEVICE.type == "cuda":
 
-        points_A /= scale
-        points_B /= scale
+            torch.cuda.empty_cache()
 
     return (
         points_A,
@@ -302,18 +339,26 @@ def run_loftr(
 
 
 # ================================================================
-# 🎯 CONFIDENCE FILTER
+# CONFIDENCE FILTER
 # ================================================================
 
 def filter_matches(
     points_A,
     points_B,
-    confidence,
-    threshold
+    confidence
 ):
 
+    if len(points_A) == 0:
+
+        return (
+            points_A,
+            points_B,
+            confidence
+        )
+
     mask = (
-        confidence >= threshold
+        confidence
+        >= CONFIDENCE_THRESHOLD
     )
 
     return (
@@ -324,7 +369,7 @@ def filter_matches(
 
 
 # ================================================================
-# 🔗 REMOVE DUPLICATE / NEAR-DUPLICATE MATCHES
+# REMOVE DUPLICATE MATCHES
 # ================================================================
 
 def remove_duplicate_matches(
@@ -334,18 +379,16 @@ def remove_duplicate_matches(
 ):
 
     if len(points_A) == 0:
+
         return (
             points_A,
             points_B,
             confidence
         )
 
-    # Round coordinates to prevent repeated
-    # matches occupying the exact same pixel region.
-
     rounded = np.round(
         points_A
-    ).astype(int)
+    ).astype(np.int32)
 
     _, indices = np.unique(
         rounded,
@@ -365,7 +408,7 @@ def remove_duplicate_matches(
 
 
 # ================================================================
-# 📐 RANSAC
+# RANSAC
 # ================================================================
 
 def run_ransac(
@@ -379,8 +422,8 @@ def run_ransac(
         return None
 
     H, mask = cv2.findHomography(
-        points_A,
-        points_B,
+        points_A.astype(np.float32),
+        points_B.astype(np.float32),
         cv2.RANSAC,
         RANSAC_THRESHOLD
     )
@@ -389,37 +432,59 @@ def run_ransac(
 
         return None
 
-    mask = mask.ravel().astype(bool)
+    mask = (
+        mask
+        .ravel()
+        .astype(bool)
+    )
 
-    inliers_A = points_A[mask]
-    inliers_B = points_B[mask]
+    inliers_A = (
+        points_A[mask]
+    )
 
-    inlier_confidence = confidence[mask]
+    inliers_B = (
+        points_B[mask]
+    )
+
+    inlier_confidence = (
+        confidence[mask]
+    )
 
     outliers = (
         len(points_A)
         - len(inliers_A)
     )
 
-    ratio = (
+    inlier_ratio = (
         len(inliers_A)
         / float(len(points_A))
     )
 
     return {
+
         "H": H,
+
         "mask": mask,
-        "inliers_A": inliers_A,
-        "inliers_B": inliers_B,
+
+        "inliers_A":
+            inliers_A,
+
+        "inliers_B":
+            inliers_B,
+
         "inlier_confidence":
             inlier_confidence,
-        "outliers": outliers,
-        "inlier_ratio": ratio
+
+        "outliers":
+            int(outliers),
+
+        "inlier_ratio":
+            float(inlier_ratio)
     }
 
 
 # ================================================================
-# 📏 REGISTRATION ERROR
+# REGISTRATION ERROR
 # ================================================================
 
 def calculate_registration_error(
@@ -428,6 +493,12 @@ def calculate_registration_error(
     inliers_B
 ):
 
+    if len(inliers_A) == 0:
+
+        raise ValueError(
+            "No RANSAC inliers available."
+        )
+
     projected = cv2.perspectiveTransform(
         inliers_A.reshape(
             -1,
@@ -435,10 +506,14 @@ def calculate_registration_error(
             2
         ).astype(np.float32),
         H
-    ).reshape(-1, 2)
+    ).reshape(
+        -1,
+        2
+    )
 
     errors = np.linalg.norm(
-        projected - inliers_B,
+        projected
+        - inliers_B,
         axis=1
     )
 
@@ -458,39 +533,41 @@ def calculate_registration_error(
         errors.max()
     )
 
-    # ------------------------------------------------------------
-    # Sub-pixel percentage
-    #
-    # Percentage of verified matches with
-    # geometric error below 1 pixel.
-    #
-    # This is an evaluation metric, NOT a claim that
-    # the complete system has achieved sub-pixel accuracy.
-    # ------------------------------------------------------------
-
-    subpixel_count = np.sum(
-        errors < 1.0
+    subpixel_count = int(
+        np.sum(
+            errors < 1.0
+        )
     )
 
     subpixel_percentage = (
-        subpixel_count /
-        float(len(errors))
+        subpixel_count
+        / float(len(errors))
         * 100.0
     )
 
     return {
-        "errors": errors,
-        "rmse": rmse,
-        "mean_error": mean_error,
+
+        "errors":
+            errors,
+
+        "rmse":
+            rmse,
+
+        "mean_error":
+            mean_error,
+
         "maximum_error":
             maximum_error,
+
         "subpixel_percentage":
-            float(subpixel_percentage)
+            float(
+                subpixel_percentage
+            )
     }
 
 
 # ================================================================
-# 🗺️ SPATIAL ANALYSIS
+# SPATIAL ANALYSIS
 # ================================================================
 
 def analyze_spatial_distribution(
@@ -501,33 +578,39 @@ def analyze_spatial_distribution(
 ):
 
     counts = np.zeros(
-        (GRID_ROWS, GRID_COLS),
-        dtype=int
+        (
+            GRID_ROWS,
+            GRID_COLS
+        ),
+        dtype=np.int32
     )
 
     quality = np.zeros(
-        (GRID_ROWS, GRID_COLS),
-        dtype=float
+        (
+            GRID_ROWS,
+            GRID_COLS
+        ),
+        dtype=np.float32
     )
-
-    # ------------------------------------------------------------
-    # Assign every match to a spatial cell
-    # ------------------------------------------------------------
 
     for point, conf in zip(
         points,
         confidence
     ):
 
-        x = point[0]
-        y = point[1]
+        x = float(point[0])
+        y = float(point[1])
 
         col = int(
-            x / width * GRID_COLS
+            x
+            / float(width)
+            * GRID_COLS
         )
 
         row = int(
-            y / height * GRID_ROWS
+            y
+            / float(height)
+            * GRID_ROWS
         )
 
         col = min(
@@ -542,15 +625,17 @@ def analyze_spatial_distribution(
 
         counts[row, col] += 1
 
-        quality[row, col] += conf
+        quality[row, col] += float(
+            conf
+        )
 
-    # ------------------------------------------------------------
-    # Average confidence per cell
-    # ------------------------------------------------------------
+    for r in range(
+        GRID_ROWS
+    ):
 
-    for r in range(GRID_ROWS):
-
-        for c in range(GRID_COLS):
+        for c in range(
+            GRID_COLS
+        ):
 
             if counts[r, c] > 0:
 
@@ -558,57 +643,50 @@ def analyze_spatial_distribution(
                     counts[r, c]
                 )
 
-    # ------------------------------------------------------------
-    # Spatial coverage
-    # ------------------------------------------------------------
-
-    occupied = np.count_nonzero(
-        counts
+    occupied = int(
+        np.count_nonzero(
+            counts
+        )
     )
 
     total_cells = (
-        GRID_ROWS *
-        GRID_COLS
+        GRID_ROWS
+        * GRID_COLS
     )
 
     coverage = (
-        occupied /
-        float(total_cells)
+        occupied
+        / float(total_cells)
     )
 
-    # ------------------------------------------------------------
-    # Match distribution uniformity
-    #
-    # A perfectly uniform distribution would have
-    # similar match counts across occupied cells.
-    # ------------------------------------------------------------
+    nonzero_counts = (
+        counts[counts > 0]
+    )
 
-    nonzero_counts = counts[
-        counts > 0
-    ]
+    if len(
+        nonzero_counts
+    ) > 1:
 
-    if len(nonzero_counts) > 1:
-
-        mean_count = (
+        mean_count = float(
             nonzero_counts.mean()
         )
 
-        std_count = (
+        std_count = float(
             nonzero_counts.std()
         )
 
         if mean_count > 0:
 
             coefficient_variation = (
-                std_count /
-                mean_count
+                std_count
+                / mean_count
             )
 
             uniformity = (
-                1.0 /
-                (
-                    1.0 +
-                    coefficient_variation
+                1.0
+                / (
+                    1.0
+                    + coefficient_variation
                 )
             )
 
@@ -616,26 +694,34 @@ def analyze_spatial_distribution(
 
             uniformity = 0.0
 
+    elif len(
+        nonzero_counts
+    ) == 1:
+
+        uniformity = 1.0
+
     else:
 
-        uniformity = (
-            1.0
-            if len(nonzero_counts) == 1
-            else 0.0
-        )
+        uniformity = 0.0
 
     return {
-        "counts": counts,
-        "quality": quality,
+
+        "counts":
+            counts,
+
+        "quality":
+            quality,
+
         "coverage":
             float(coverage),
+
         "uniformity":
             float(uniformity)
     }
 
 
 # ================================================================
-# 🧠 QUALITY SCORE
+# QUALITY SCORE
 # ================================================================
 
 def calculate_quality_score(
@@ -646,42 +732,39 @@ def calculate_quality_score(
     rmse
 ):
 
-    # ------------------------------------------------------------
-    # RMSE component
-    #
-    # Lower error = better score.
-    # ------------------------------------------------------------
-
     error_score = max(
         0.0,
-        1.0 -
-        min(rmse / 10.0, 1.0)
+        1.0
+        - min(
+            rmse / 10.0,
+            1.0
+        )
     )
 
     score = (
 
-        0.30 *
-        inlier_ratio
+        0.30
+        * inlier_ratio
 
         +
 
-        0.25 *
-        average_confidence
+        0.25
+        * average_confidence
 
         +
 
-        0.20 *
-        spatial_coverage
+        0.20
+        * spatial_coverage
 
         +
 
-        0.15 *
-        spatial_uniformity
+        0.15
+        * spatial_uniformity
 
         +
 
-        0.10 *
-        error_score
+        0.10
+        * error_score
     )
 
     return float(
@@ -694,237 +777,7 @@ def calculate_quality_score(
 
 
 # ================================================================
-# 🔬 ADAPTIVE MATCHING
-# ================================================================
-
-def adaptive_matching(
-    image_A,
-    image_B
-):
-
-    print("\n" + "=" * 75)
-    print("🔬 ADAPTIVE MULTI-SCALE LoFTR")
-    print("=" * 75)
-
-    candidates = []
-
-    for scale in SCALES:
-
-        print(
-            "\n🔍 Testing scale:",
-            scale
-        )
-
-        try:
-
-            pA, pB, conf = run_loftr(
-                image_A,
-                image_B,
-                scale
-            )
-
-            print(
-                "   Raw matches:",
-                len(pA)
-            )
-
-            # ----------------------------------------------------
-            # Confidence filtering
-            # ----------------------------------------------------
-
-            pA, pB, conf = (
-                filter_matches(
-                    pA,
-                    pB,
-                    conf,
-                    CONFIDENCE_THRESHOLD
-                )
-            )
-
-            print(
-                "   After confidence filter:",
-                len(pA)
-            )
-
-            # ----------------------------------------------------
-            # Remove duplicates
-            # ----------------------------------------------------
-
-            pA, pB, conf = (
-                remove_duplicate_matches(
-                    pA,
-                    pB,
-                    conf
-                )
-            )
-
-            print(
-                "   After duplicate removal:",
-                len(pA)
-            )
-
-            if len(pA) < MIN_MATCHES:
-
-                print(
-                    "   ❌ Not enough matches"
-                )
-
-                continue
-
-            # ----------------------------------------------------
-            # RANSAC
-            # ----------------------------------------------------
-
-            ransac = run_ransac(
-                pA,
-                pB,
-                conf
-            )
-
-            if ransac is None:
-
-                print(
-                    "   ❌ RANSAC failed"
-                )
-
-                continue
-
-            # ----------------------------------------------------
-            # Registration error
-            # ----------------------------------------------------
-
-            error = (
-                calculate_registration_error(
-                    ransac["H"],
-                    ransac["inliers_A"],
-                    ransac["inliers_B"]
-                )
-            )
-
-            spatial = (
-                analyze_spatial_distribution(
-                    ransac["inliers_A"],
-                    ransac["inlier_confidence"],
-                    TARGET_WIDTH,
-                    TARGET_HEIGHT
-                )
-            )
-
-            # ----------------------------------------------------
-            # Quality
-            # ----------------------------------------------------
-
-            average_confidence = float(
-                ransac[
-                    "inlier_confidence"
-                ].mean()
-            )
-
-            quality_score = (
-                calculate_quality_score(
-                    ransac["inlier_ratio"],
-                    average_confidence,
-                    spatial["coverage"],
-                    spatial["uniformity"],
-                    error["rmse"]
-                )
-            )
-
-            candidate = {
-
-                "scale": scale,
-
-                "points_A": pA,
-
-                "points_B": pB,
-
-                "confidence": conf,
-
-                "ransac": ransac,
-
-                "error": error,
-
-                "spatial": spatial,
-
-                "quality_score":
-                    quality_score
-            }
-
-            candidates.append(
-                candidate
-            )
-
-            print(
-                "   RANSAC inliers:",
-                len(
-                    ransac["inliers_A"]
-                )
-            )
-
-            print(
-                "   Inlier ratio:",
-                round(
-                    ransac[
-                        "inlier_ratio"
-                    ] * 100,
-                    2
-                ),
-                "%"
-            )
-
-            print(
-                "   RMSE:",
-                round(
-                    error["rmse"],
-                    4
-                )
-            )
-
-            print(
-                "   Quality:",
-                round(
-                    quality_score,
-                    4
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                "   ⚠️ Scale failed:",
-                e
-            )
-
-    # ------------------------------------------------------------
-    # No valid candidate
-    # ------------------------------------------------------------
-
-    if len(candidates) == 0:
-
-        raise RuntimeError(
-            "No valid LoFTR/RANSAC solution found."
-        )
-
-    # ------------------------------------------------------------
-    # Select highest quality candidate
-    # ------------------------------------------------------------
-
-    best = max(
-        candidates,
-        key=lambda x:
-        x["quality_score"]
-    )
-
-    print(
-        "\n🏆 Selected scale:",
-        best["scale"]
-    )
-
-    return best
-
-
-# ================================================================
-# 🌕 REGISTRATION REFINEMENT
+# REGISTRATION REFINEMENT
 # ================================================================
 
 def refine_registration(
@@ -933,22 +786,22 @@ def refine_registration(
     H
 ):
 
+    base_A = resize_image(
+        image_A
+    )
+
+    base_B = resize_image(
+        image_B
+    )
+
     warped = cv2.warpPerspective(
-        image_A,
+        base_A,
         H,
         (
             TARGET_WIDTH,
             TARGET_HEIGHT
         )
     )
-
-    # ------------------------------------------------------------
-    # ECC alignment
-    #
-    # This refines image-level alignment from the RANSAC
-    # transformation. It is used as a refinement stage,
-    # not as a replacement for geometric verification.
-    # ------------------------------------------------------------
 
     warp_matrix = np.eye(
         2,
@@ -959,15 +812,16 @@ def refine_registration(
     criteria = (
         cv2.TERM_CRITERIA_EPS
         | cv2.TERM_CRITERIA_COUNT,
-        50,
-        1e-5
+        30,
+        1e-4
     )
 
     try:
 
         correlation, warp_matrix = (
             cv2.findTransformECC(
-                image_B.astype(
+
+                base_B.astype(
                     np.float32
                 ) / 255.0,
 
@@ -993,17 +847,21 @@ def refine_registration(
             flags=cv2.INTER_LINEAR
         )
 
-        return refined, float(
-            correlation
+        return (
+            refined,
+            float(correlation)
         )
 
     except Exception:
 
-        return warped, 0.0
+        return (
+            warped,
+            0.0
+        )
 
 
 # ================================================================
-# 🎨 RANSAC VISUALIZATION
+# RANSAC VISUALIZATION
 # ================================================================
 
 def create_ransac_visualization(
@@ -1031,64 +889,68 @@ def create_ransac_visualization(
         )
     )
 
-    width = image_A.shape[1]
+    width = (
+        display_A.shape[1]
+    )
 
     number = min(
         MAX_VISUAL_MATCHES,
         len(inliers_A)
     )
 
-    indices = np.argsort(
-        confidence
-    )[::-1][:number]
+    if number > 0:
 
-    for idx in indices:
+        indices = np.argsort(
+            confidence
+        )[::-1][:number]
 
-        x1 = int(
-            inliers_A[idx][0]
-        )
+        for idx in indices:
 
-        y1 = int(
-            inliers_A[idx][1]
-        )
+            x1 = int(
+                inliers_A[idx][0]
+            )
 
-        x2 = int(
-            inliers_B[idx][0]
-        ) + width
+            y1 = int(
+                inliers_A[idx][1]
+            )
 
-        y2 = int(
-            inliers_B[idx][1]
-        )
+            x2 = int(
+                inliers_B[idx][0]
+            ) + width
 
-        cv2.circle(
-            combined,
-            (x1, y1),
-            3,
-            (0, 255, 0),
-            -1
-        )
+            y2 = int(
+                inliers_B[idx][1]
+            )
 
-        cv2.circle(
-            combined,
-            (x2, y2),
-            3,
-            (0, 255, 0),
-            -1
-        )
+            cv2.circle(
+                combined,
+                (x1, y1),
+                2,
+                (0, 255, 0),
+                -1
+            )
 
-        cv2.line(
-            combined,
-            (x1, y1),
-            (x2, y2),
-            (255, 180, 0),
-            1
-        )
+            cv2.circle(
+                combined,
+                (x2, y2),
+                2,
+                (0, 255, 0),
+                -1
+            )
+
+            cv2.line(
+                combined,
+                (x1, y1),
+                (x2, y2),
+                (255, 180, 0),
+                1
+            )
 
     return combined
 
 
 # ================================================================
-# 🗺️ QUALITY MAP VISUALIZATION
+# QUALITY MAP
 # ================================================================
 
 def create_quality_map(
@@ -1096,19 +958,27 @@ def create_quality_map(
     cell_quality
 ):
 
-    height, width = image.shape
+    height, width = (
+        image.shape
+    )
 
     normalized = (
         np.clip(
             cell_quality,
             0,
             1
-        ) * 255
-    ).astype(np.uint8)
+        )
+        * 255
+    ).astype(
+        np.uint8
+    )
 
     heatmap_small = cv2.resize(
         normalized,
-        (width, height),
+        (
+            width,
+            height
+        ),
         interpolation=cv2.INTER_NEAREST
     )
 
@@ -1130,16 +1000,14 @@ def create_quality_map(
         0
     )
 
-    # Grid
-
     for r in range(
         GRID_ROWS + 1
     ):
 
         y = int(
-            r *
-            height /
-            GRID_ROWS
+            r
+            * height
+            / GRID_ROWS
         )
 
         cv2.line(
@@ -1155,9 +1023,9 @@ def create_quality_map(
     ):
 
         x = int(
-            c *
-            width /
-            GRID_COLS
+            c
+            * width
+            / GRID_COLS
         )
 
         cv2.line(
@@ -1172,7 +1040,7 @@ def create_quality_map(
 
 
 # ================================================================
-# 📍 SPATIAL DISTRIBUTION VISUALIZATION
+# SPATIAL DISTRIBUTION VISUALIZATION
 # ================================================================
 
 def create_spatial_visualization(
@@ -1185,18 +1053,18 @@ def create_spatial_visualization(
         cv2.COLOR_GRAY2BGR
     )
 
-    height, width = image.shape
-
-    # Grid
+    height, width = (
+        image.shape
+    )
 
     for r in range(
         GRID_ROWS + 1
     ):
 
         y = int(
-            r *
-            height /
-            GRID_ROWS
+            r
+            * height
+            / GRID_ROWS
         )
 
         cv2.line(
@@ -1212,9 +1080,9 @@ def create_spatial_visualization(
     ):
 
         x = int(
-            c *
-            width /
-            GRID_COLS
+            c
+            * width
+            / GRID_COLS
         )
 
         cv2.line(
@@ -1225,17 +1093,30 @@ def create_spatial_visualization(
             1
         )
 
-    # Points
-
     for point in points:
 
-        x = int(point[0])
-        y = int(point[1])
+        x = int(
+            point[0]
+        )
+
+        y = int(
+            point[1]
+        )
+
+        x = min(
+            max(x, 0),
+            width - 1
+        )
+
+        y = min(
+            max(y, 0),
+            height - 1
+        )
 
         cv2.circle(
             canvas,
             (x, y),
-            3,
+            2,
             (0, 255, 0),
             -1
         )
@@ -1244,27 +1125,40 @@ def create_spatial_visualization(
 
 
 # ================================================================
-# 💾 SAVE IMAGE
+# SAVE IMAGE
 # ================================================================
 
 def save_image(
     image,
-    filename
+    path
 ):
 
-    cv2.imwrite(
-        filename,
+    directory = os.path.dirname(
+        path
+    )
+
+    if directory:
+
+        os.makedirs(
+            directory,
+            exist_ok=True
+        )
+
+    success = cv2.imwrite(
+        path,
         image
     )
 
-    print(
-        "💾 Saved:",
-        filename
-    )
+    if not success:
+
+        raise IOError(
+            "Could not save image: "
+            + path
+        )
 
 
 # ================================================================
-# 🚀 COMPLETE PIPELINE
+# COMPLETE ANALYSIS
 # ================================================================
 
 def analyze_lunar_images(
@@ -1278,13 +1172,13 @@ def analyze_lunar_images(
         exist_ok=True
     )
 
-    print("\n" + "=" * 75)
-    print("🚀 STARTING COMPLETE LUNAR ANALYSIS")
-    print("=" * 75)
+    print("\n" + "=" * 70)
+    print("🚀 STARTING LUNAR ANALYSIS")
+    print("=" * 70)
 
-    # ============================================================
-    # 1. LOAD
-    # ============================================================
+    # ------------------------------------------------------------
+    # LOAD
+    # ------------------------------------------------------------
 
     image_A = cv2.imread(
         file_A,
@@ -1308,9 +1202,7 @@ def analyze_lunar_images(
             "Could not load Image B."
         )
 
-    print(
-        "\n✅ Input images loaded"
-    )
+    print("✅ Images loaded")
 
     print(
         "Image A:",
@@ -1322,20 +1214,24 @@ def analyze_lunar_images(
         image_B.shape
     )
 
-    # ============================================================
-    # 2. PREPROCESSING
-    # ============================================================
+    # ------------------------------------------------------------
+    # PREPROCESS
+    # ------------------------------------------------------------
 
     print(
-        "\n🧹 Running illumination-robust preprocessing..."
+        "\n🧹 Preprocessing..."
     )
 
-    processed_A = preprocess_image(
-        image_A
+    processed_A = (
+        preprocess_image(
+            image_A
+        )
     )
 
-    processed_B = preprocess_image(
-        image_B
+    processed_B = (
+        preprocess_image(
+            image_B
+        )
     )
 
     save_image(
@@ -1354,22 +1250,189 @@ def analyze_lunar_images(
         )
     )
 
-    # ============================================================
-    # 3. ADAPTIVE MULTI-SCALE MATCHING
-    # ============================================================
+    # ------------------------------------------------------------
+    # LoFTR
+    # ------------------------------------------------------------
 
-    best = adaptive_matching(
-        processed_A,
-        processed_B
+    print(
+        "\n🤖 Running LoFTR..."
     )
 
-    ransac = best["ransac"]
-    error = best["error"]
-    spatial = best["spatial"]
+    points_A, points_B, confidence = (
+        run_loftr(
+            processed_A,
+            processed_B
+        )
+    )
 
-    # ============================================================
-    # 4. REGISTRATION REFINEMENT
-    # ============================================================
+    raw_matches = len(
+        points_A
+    )
+
+    print(
+        "Raw LoFTR matches:",
+        raw_matches
+    )
+
+    # ------------------------------------------------------------
+    # CONFIDENCE FILTER
+    # ------------------------------------------------------------
+
+    points_A, points_B, confidence = (
+        filter_matches(
+            points_A,
+            points_B,
+            confidence
+        )
+    )
+
+    print(
+        "After confidence filter:",
+        len(points_A)
+    )
+
+    # ------------------------------------------------------------
+    # DUPLICATE REMOVAL
+    # ------------------------------------------------------------
+
+    points_A, points_B, confidence = (
+        remove_duplicate_matches(
+            points_A,
+            points_B,
+            confidence
+        )
+    )
+
+    print(
+        "After duplicate removal:",
+        len(points_A)
+    )
+
+    if len(points_A) < MIN_MATCHES:
+
+        raise RuntimeError(
+            "Not enough reliable LoFTR matches "
+            "for RANSAC."
+        )
+
+    # ------------------------------------------------------------
+    # RANSAC
+    # ------------------------------------------------------------
+
+    print(
+        "\n📐 Running RANSAC..."
+    )
+
+    ransac = run_ransac(
+        points_A,
+        points_B,
+        confidence
+    )
+
+    if ransac is None:
+
+        raise RuntimeError(
+            "RANSAC could not estimate a valid "
+            "geometric transformation."
+        )
+
+    print(
+        "RANSAC inliers:",
+        len(
+            ransac["inliers_A"]
+        )
+    )
+
+    print(
+        "RANSAC outliers:",
+        ransac["outliers"]
+    )
+
+    print(
+        "Inlier ratio:",
+        round(
+            ransac[
+                "inlier_ratio"
+            ] * 100,
+            2
+        ),
+        "%"
+    )
+
+    # ------------------------------------------------------------
+    # REGISTRATION ERROR
+    # ------------------------------------------------------------
+
+    error = (
+        calculate_registration_error(
+            ransac["H"],
+            ransac["inliers_A"],
+            ransac["inliers_B"]
+        )
+    )
+
+    # ------------------------------------------------------------
+    # SPATIAL ANALYSIS
+    # ------------------------------------------------------------
+
+    spatial = (
+        analyze_spatial_distribution(
+            ransac["inliers_A"],
+            ransac[
+                "inlier_confidence"
+            ],
+            TARGET_WIDTH,
+            TARGET_HEIGHT
+        )
+    )
+
+    # ------------------------------------------------------------
+    # CONFIDENCE
+    # ------------------------------------------------------------
+
+    average_confidence = float(
+        ransac[
+            "inlier_confidence"
+        ].mean()
+    )
+
+    best_confidence = float(
+        ransac[
+            "inlier_confidence"
+        ].max()
+    )
+
+    lowest_confidence = float(
+        ransac[
+            "inlier_confidence"
+        ].min()
+    )
+
+    # ------------------------------------------------------------
+    # QUALITY
+    # ------------------------------------------------------------
+
+    quality_score = (
+        calculate_quality_score(
+            ransac[
+                "inlier_ratio"
+            ],
+            average_confidence,
+            spatial[
+                "coverage"
+            ],
+            spatial[
+                "uniformity"
+            ],
+            error[
+                "rmse"
+            ]
+        )
+    )
+
+    # ------------------------------------------------------------
+    # REGISTRATION
+    # ------------------------------------------------------------
 
     print(
         "\n🔧 Refining registration..."
@@ -1391,20 +1454,28 @@ def analyze_lunar_images(
         )
     )
 
-    # ============================================================
-    # 5. VISUALIZATIONS
-    # ============================================================
+    # ------------------------------------------------------------
+    # VISUALIZATIONS
+    # ------------------------------------------------------------
+
+    base_A = resize_image(
+        processed_A
+    )
+
+    base_B = resize_image(
+        processed_B
+    )
 
     ransac_visual = (
         create_ransac_visualization(
-            resize_image(
-                processed_A
-            ),
-            resize_image(
-                processed_B
-            ),
-            ransac["inliers_A"],
-            ransac["inliers_B"],
+            base_A,
+            base_B,
+            ransac[
+                "inliers_A"
+            ],
+            ransac[
+                "inliers_B"
+            ],
             ransac[
                 "inlier_confidence"
             ]
@@ -1421,10 +1492,10 @@ def analyze_lunar_images(
 
     quality_visual = (
         create_quality_map(
-            resize_image(
-                processed_A
-            ),
-            spatial["quality"]
+            base_A,
+            spatial[
+                "quality"
+            ]
         )
     )
 
@@ -1438,10 +1509,10 @@ def analyze_lunar_images(
 
     spatial_visual = (
         create_spatial_visualization(
-            resize_image(
-                processed_A
-            ),
-            ransac["inliers_A"]
+            base_A,
+            ransac[
+                "inliers_A"
+            ]
         )
     )
 
@@ -1453,52 +1524,22 @@ def analyze_lunar_images(
         )
     )
 
-    # ============================================================
-    # 6. FINAL METRICS
-    # ============================================================
-
-    total_matches = len(
-        best["points_A"]
-    )
-
-    average_confidence = float(
-        best["confidence"].mean()
-    )
-
-    best_confidence = float(
-        best["confidence"].max()
-    )
-
-    lowest_confidence = float(
-        best["confidence"].min()
-    )
-
-    inliers = len(
-        ransac["inliers_A"]
-    )
-
-    outliers = ransac[
-        "outliers"
-    ]
-
-    inlier_ratio = (
-        ransac[
-            "inlier_ratio"
-        ]
-    )
-
-    quality_score = (
-        best["quality_score"]
-    )
-
-    # ============================================================
-    # 7. FINAL STATUS
-    # ============================================================
+    # ------------------------------------------------------------
+    # FINAL STATUS
+    # ------------------------------------------------------------
 
     if (
-        inlier_ratio >= 0.70
-        and error["rmse"] < 5.0
-        and spatial["coverage"] >= 0.50
+        ransac[
+            "inlier_ratio"
+        ] >= 0.70
+
+        and error[
+            "rmse"
+        ] < 5.0
+
+        and spatial[
+            "coverage"
+        ] >= 0.50
     ):
 
         status = (
@@ -1506,8 +1547,13 @@ def analyze_lunar_images(
         )
 
     elif (
-        inlier_ratio >= 0.50
-        and error["rmse"] < 10.0
+        ransac[
+            "inlier_ratio"
+        ] >= 0.50
+
+        and error[
+            "rmse"
+        ] < 10.0
     ):
 
         status = (
@@ -1520,21 +1566,43 @@ def analyze_lunar_images(
             "LOW-QUALITY CORRESPONDENCE"
         )
 
-    # ============================================================
-    # 8. PRINT FINAL REPORT
-    # ============================================================
+    # ------------------------------------------------------------
+    # FINAL REPORT
+    # ------------------------------------------------------------
 
-    print("\n" + "=" * 75)
+    total_matches = len(
+        points_A
+    )
+
+    inliers = len(
+        ransac[
+            "inliers_A"
+        ]
+    )
+
+    outliers = int(
+        ransac[
+            "outliers"
+        ]
+    )
+
+    inlier_ratio = float(
+        ransac[
+            "inlier_ratio"
+        ]
+    )
+
+    print("\n" + "=" * 70)
     print("🌕 FINAL LUNAR ANALYSIS REPORT")
-    print("=" * 75)
+    print("=" * 70)
 
     print(
-        "\n🔭 Selected scale:",
-        best["scale"]
+        "\n🔭 Processing scale:",
+        SCALE
     )
 
     print(
-        "🔗 Total LoFTR matches:",
+        "🔗 Total matches:",
         total_matches
     )
 
@@ -1602,7 +1670,9 @@ def analyze_lunar_images(
     print(
         "⚠️ Maximum error:",
         round(
-            error["maximum_error"],
+            error[
+                "maximum_error"
+            ],
             4
         ),
         "pixels"
@@ -1622,7 +1692,9 @@ def analyze_lunar_images(
     print(
         "\n🗺️ Spatial coverage:",
         round(
-            spatial["coverage"] * 100,
+            spatial[
+                "coverage"
+            ] * 100,
             2
         ),
         "%"
@@ -1631,7 +1703,9 @@ def analyze_lunar_images(
     print(
         "📍 Spatial uniformity:",
         round(
-            spatial["uniformity"],
+            spatial[
+                "uniformity"
+            ],
             4
         )
     )
@@ -1645,7 +1719,7 @@ def analyze_lunar_images(
     )
 
     print(
-        "🔧 ECC refinement correlation:",
+        "🔧 ECC correlation:",
         round(
             ecc_score,
             5
@@ -1657,22 +1731,19 @@ def analyze_lunar_images(
         status
     )
 
-    print("\n" + "=" * 75)
-    print(
-        "🌕 LUNAR IMAGE CORRESPONDENCE AND REGISTRATION SYSTEM"
-    )
-    print("=" * 75)
+    print("\n" + "=" * 70)
 
-    # ============================================================
-    # 9. RETURN EVERYTHING
-    # ============================================================
+    # ------------------------------------------------------------
+    # RETURN RESULT
+    # ------------------------------------------------------------
 
     return {
 
-        "status": status,
+        "status":
+            status,
 
         "selected_scale":
-            best["scale"],
+            SCALE,
 
         "total_matches":
             total_matches,
@@ -1702,7 +1773,9 @@ def analyze_lunar_images(
             error["mean_error"],
 
         "maximum_error":
-            error["maximum_error"],
+            error[
+                "maximum_error"
+            ],
 
         "subpixel_percentage":
             error[
@@ -1710,10 +1783,14 @@ def analyze_lunar_images(
             ],
 
         "spatial_coverage":
-            spatial["coverage"] * 100,
+            spatial[
+                "coverage"
+            ] * 100,
 
         "spatial_uniformity":
-            spatial["uniformity"],
+            spatial[
+                "uniformity"
+            ],
 
         "overall_quality":
             quality_score,
@@ -1732,7 +1809,9 @@ def analyze_lunar_images(
             ].tolist(),
 
         "homography":
-            ransac["H"].tolist(),
+            ransac[
+                "H"
+            ].tolist(),
 
         "output_folder":
             output_folder
@@ -1740,85 +1819,20 @@ def analyze_lunar_images(
 
 
 # ================================================================
-# 🧪 TEST MODE
+# LOCAL TEST MODE
 # ================================================================
 
 if __name__ == "__main__":
 
-    print("\n📂 Select Image A")
-
-    from tkinter import (
-        Tk,
-        filedialog
-    )
-
-    root = Tk()
-
-    root.withdraw()
-
-    file_A = (
-        filedialog
-        .askopenfilename(
-            title="Select Lunar Image A",
-            filetypes=[
-                (
-                    "Image files",
-                    "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"
-                )
-            ]
-        )
-    )
-
-    root.destroy()
-
-    if not file_A:
-
-        print(
-            "❌ Image A not selected."
-        )
-
-        exit()
-
-
-    print("\n📂 Select Image B")
-
-    root = Tk()
-
-    root.withdraw()
-
-    file_B = (
-        filedialog
-        .askopenfilename(
-            title="Select Lunar Image B",
-            filetypes=[
-                (
-                    "Image files",
-                    "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"
-                )
-            ]
-        )
-    )
-
-    root.destroy()
-
-    if not file_B:
-
-        print(
-            "❌ Image B not selected."
-        )
-
-        exit()
-
-
-    # ============================================================
-    # RUN
-    # ============================================================
-
-    results = analyze_lunar_images(
-        file_A,
-        file_B
+    print(
+        "\nThis module is intended to be "
+        "used through IC.py."
     )
 
     print(
-        "\n✅ ANALYSIS COMPLETE!"
+        "Run the Flask server with:"
+    )
+
+    print(
+        "python -m gunicorn IC:app"
     )
