@@ -1529,7 +1529,7 @@ function resultURL(path) {
         return path;
     }
 
-    return "https://lunar-image-correspondence-and-registration.onrender.com" + path +
+    return "https://lunar-image-correspondence-and.onrender.com" + path +
            "?t=" + Date.now();
 }
 
@@ -1604,7 +1604,7 @@ async function startAnalysis() {
          */
 
         const response = await fetch(
-            "https://lunar-image-correspondence-and-registration.onrender.com/analyze",
+            "https://lunar-image-correspondence-and.onrender.com/analyze",
             {
                 method: "POST",
                 body: formData
@@ -1650,7 +1650,7 @@ async function startAnalysis() {
         showError(
             "Backend connection failed: " +
             error.message +
-            "\n\nMake sure app.py is running at https://lunar-image-correspondence-and-registration.onrender.com"
+            "\n\nMake sure app.py is running at https://lunar-image-correspondence-and.onrender.com"
         );
 
         console.error(error);
@@ -2170,7 +2170,7 @@ async function checkBackend() {
     try {
 
         const response = await fetch(
-            "https://lunar-image-correspondence-and-registration.onrender.com/status"
+            "https://lunar-image-correspondence-and.onrender.com/status"
         );
 
 
